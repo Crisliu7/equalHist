@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <cuda.h>
 #include <time.h>
+#include <math.h>
+#include <iostream>
 
 #define TIMER_CREATE(t)               \
   cudaEvent_t t##_start, t##_end;     \
@@ -23,6 +25,7 @@
   cudaEventDestroy(t##_end);     
   
 #define TILE_SIZE 16
+#define NUM_GRAY_LEVELS 256
 #define CUDA_TIMING
 #define DEBUG
 
@@ -50,16 +53,52 @@ inline cudaError_t checkCuda(cudaError_t result) {
                 
 // Add GPU kernel and functions
 // HERE!!!
-__global__ void kernel(unsigned char *input, 
-                       unsigned char *output){
 
+
+__global__ void kernel(unsigned char *input, unsigned long int *output_cdf, 
+                       unsigned char *output, unsigned long int im_size, unsigned long int cdf_min){
+                       
     int x = blockIdx.x*TILE_SIZE+threadIdx.x;
     int y = blockIdx.y*TILE_SIZE+threadIdx.y;
 
     int location = 	y*TILE_SIZE*gridDim.x+x;
-    output[location] = x%255;
+    
+    float temp = (output_cdf[input[location]] - cdf_min)/(im_size - cdf_min)*(NUM_GRAY_LEVELS - 1);
+    float temp2 = round(temp) ;
+    output[location] = int(temp2);
+    
+    printf("the first: %f  . the seond: %f  . the final: %d .", temp, temp2, output[location]);
 
 }
+
+__global__ void get_probability(unsigned char *input, 
+                             unsigned int *output_probability){
+    
+    int x = blockIdx.x*TILE_SIZE+threadIdx.x;
+    int y = blockIdx.y*TILE_SIZE+threadIdx.y;
+
+    int location = 	y*TILE_SIZE*gridDim.x+x;
+    
+    atomicAdd(&(output_probability[input[location]]), 1);
+    __syncthreads();
+    
+}
+
+   __global__ void get_cdf(unsigned int *output_probability, unsigned long int *output_cdf, int n)
+{
+    unsigned int d_hist_idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (d_hist_idx == 0 || d_hist_idx >= n)
+    {
+    	return;
+    }
+    unsigned int cdf_val = 0;
+    for (int i = 0; i <= d_hist_idx; ++i)
+    {
+    	cdf_val = cdf_val + output_probability[i];
+    }
+    output_cdf[d_hist_idx] = cdf_val;
+}
+
 
 void histogram_gpu(unsigned char *data, 
                    unsigned int height, 
@@ -73,11 +112,24 @@ void histogram_gpu(unsigned char *data,
 	
 	// Both are the same size (CPU/GPU).
 	int size = XSize*YSize;
+ 
+  // CPU
+  unsigned int *probability_gpu = new unsigned int [NUM_GRAY_LEVELS];
+  unsigned long int *cdf_gpu = new unsigned long int [NUM_GRAY_LEVELS];
+  
+  // GPU
+  unsigned int *output_probability;
+  unsigned long int *output_cdf;
+  
 	
 	// Allocate arrays in GPU memory
 	checkCuda(cudaMalloc((void**)&input_gpu   , size*sizeof(unsigned char)));
 	checkCuda(cudaMalloc((void**)&output_gpu  , size*sizeof(unsigned char)));
+ checkCuda(cudaMalloc((void**)&output_probability  , NUM_GRAY_LEVELS*sizeof(unsigned int)));
+ checkCuda(cudaMalloc((void**)&output_cdf  , NUM_GRAY_LEVELS*sizeof(unsigned long int)));
 	
+   checkCuda(cudaMemset(output_probability , 0 , NUM_GRAY_LEVELS*sizeof(unsigned int)));
+   checkCuda(cudaMemset(output_cdf , 0 , NUM_GRAY_LEVELS*sizeof(unsigned long int)));
     checkCuda(cudaMemset(output_gpu , 0 , size*sizeof(unsigned char)));
 	
     // Copy data to GPU
@@ -86,7 +138,7 @@ void histogram_gpu(unsigned char *data,
         size*sizeof(char), 
         cudaMemcpyHostToDevice));
 
-	checkCuda(cudaDeviceSynchronize());
+	  checkCuda(cudaDeviceSynchronize());
 
     // Execute algorithm
 
@@ -100,8 +152,11 @@ void histogram_gpu(unsigned char *data,
 		TIMER_START(Ktime);
 	#endif
         
-        kernel<<<dimGrid, dimBlock>>>(input_gpu, 
-                                      output_gpu);
+   get_probability<<<dimGrid, dimBlock>>>(input_gpu, output_probability);
+   get_cdf<<<dimGrid, dimBlock>>>(output_probability, output_cdf, NUM_GRAY_LEVELS);
+
+        
+        
         checkCuda(cudaPeekAtLastError());                                     
         checkCuda(cudaDeviceSynchronize());
 	
@@ -111,17 +166,52 @@ void histogram_gpu(unsigned char *data,
 	#endif
         
 	// Retrieve results from the GPU
+
+
+	checkCuda(cudaMemcpy(probability_gpu, 
+			output_probability, 
+			NUM_GRAY_LEVELS*sizeof(unsigned int), 
+			cudaMemcpyDeviceToHost));
+      
+	checkCuda(cudaMemcpy(cdf_gpu, 
+			output_cdf, 
+			NUM_GRAY_LEVELS*sizeof(unsigned long int), 
+			cudaMemcpyDeviceToHost));
+    // Free resources and end the program
+    
+   int cdf_min;
+   for (int i = 0; i < NUM_GRAY_LEVELS; i++){
+     if(cdf_gpu[i] != 0){
+       cdf_min = cdf_gpu[i];
+     }
+   }
+   
+   std::cout << "cdf min : " << cdf_min << std::endl;
+
+  kernel<<<dimGrid, dimBlock>>>(input_gpu, output_cdf, output_gpu, width*height, cdf_min);
+  checkCuda(cudaPeekAtLastError());                                     
+  checkCuda(cudaDeviceSynchronize());     
 	checkCuda(cudaMemcpy(data, 
 			output_gpu, 
 			size*sizeof(unsigned char), 
 			cudaMemcpyDeviceToHost));
-
-    // Free resources and end the program
+    
+  checkCuda(cudaFree(output_probability));
+  checkCuda(cudaFree(output_cdf));
 	checkCuda(cudaFree(output_gpu));
 	checkCuda(cudaFree(input_gpu));
+ 
+  for(int i = 0; i < NUM_GRAY_LEVELS; i++){
+    std::cout << "Value " << i << " : " << probability_gpu[i] << "  " << cdf_gpu[i] << std::endl;
+  }
+  
+  for (long int i = 0; i < 4990464; i++){
+    std::cout << data[i] << "  ";
+  }
 
 }
 
+/*
 void histogram_gpu_warmup(unsigned char *data, 
                    unsigned int height, 
                    unsigned int width){
@@ -169,5 +259,5 @@ void histogram_gpu_warmup(unsigned char *data,
 	checkCuda(cudaFree(output_gpu));
 	checkCuda(cudaFree(input_gpu));
 
-}
+}*/
 
