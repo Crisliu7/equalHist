@@ -57,7 +57,11 @@ inline cudaError_t checkCuda(cudaError_t result) {
 /**
   * The basic algorithm for Histagram Equalization can be divided into four steps:
   *   1. Calculate the histogram of the image. Considering to split one big image into multi small images and
-  *      parallelly caluculate that. Atomicadd method is initially considered to use, any optimization for that?
+  *      parallelly caluculate that. 
+  *
+  *      Atomicadd method is initially considered to use, but it will reduce the performance.
+  *
+  *      Better way to do is do per-thread histogrms parallelly, sort each gray value and reduce by key, then reduce all histograms.
   *   
   *   2. Calculate the cumulative distribution function(CDF). Using prefix sum to parallely calculate.
   *
@@ -83,7 +87,7 @@ __global__ void kernel(unsigned char *input, unsigned long int *output_cdf,
 
 }
 
-__global__ void get_probability(unsigned char *input, 
+__global__ void cal(unsigned char *input, 
                              unsigned int *output_probability){
     
     int x = blockIdx.x*TILE_SIZE+threadIdx.x;
