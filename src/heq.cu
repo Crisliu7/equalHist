@@ -54,6 +54,18 @@ inline cudaError_t checkCuda(cudaError_t result) {
 // Add GPU kernel and functions
 // HERE!!!
 
+/**
+  * The basic algorithm for Histagram Equalization can be divided into four steps:
+  *   1. Calculate the histogram of the image. Considering to split one big image into multi small images and
+  *      parallelly caluculate that. Atomicadd method is initially considered to use, any optimization for that?
+  *   
+  *   2. Calculate the cumulative distribution function(CDF). Using prefix sum to parallely calculate.
+  *
+  *   3. Calculate the cdfmin, maybe using the reduction tree method? Or this step may combine with the step 2?
+  *
+  *   4. Calculate the histogram equalization value with the given formula
+  */
+
 
 __global__ void kernel(unsigned char *input, unsigned long int *output_cdf, 
                        unsigned char *output, unsigned long int im_size, unsigned long int cdf_min){
