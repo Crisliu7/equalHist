@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <cuda.h>
@@ -22,12 +21,12 @@
   cudaEventDestroy(t##_start);                  \
   cudaEventDestroy(t##_end);
 
-#define TILE_SIZE 16
+#define TILE_SIZE 256
 #define NUM_GRAY_LEVELS 256
 #define CUDA_TIMING
 #define DEBUG
-#define R 8 // replicate factor
 #define WARP_SIZE 32
+#define R 8
 
 unsigned char *input_gpu;
 unsigned char *output_gpu;
@@ -40,7 +39,7 @@ double CLOCK()
 }
 
 /*******************************************************/
-/*                 Cuda Error Function                 */
+/* Cuda Error Function */
 /*******************************************************/
 inline cudaError_t checkCuda(cudaError_t result)
 {
@@ -58,20 +57,20 @@ inline cudaError_t checkCuda(cudaError_t result)
 // HERE!!!
 
 /**
-  * The basic algorithm for Histagram Equalization can be divided into four steps:
-  *   1. Calculate the histogram of the image. Considering to split one big image into multi small images and
-  *      parallelly caluculate that. 
-  *
-  *      Atomicadd method is initially considered to use, but it will reduce the performance.
-  *
-  *      Better way to do is do per-thread histogrms parallelly, sort each gray value and reduce by key, then reduce all histograms.
-  *   
-  *   2. Calculate the cumulative distribution function(CDF). Using prefix sum to parallely calculate.
-  *
-  *   3. Calculate the cdfmin, maybe using the reduction tree method? Or this step may combine with the step 2?
-  *
-  *   4. Calculate the histogram equalization value with the given formula
-  */
+ * The basic algorithm for Histagram Equalization can be divided into four steps:
+ * 1. Calculate the histogram of the image. Considering to split one big image into multi small images and
+ * parallelly caluculate that. 
+ *
+ * Atomicadd method is initially considered to use, but it will reduce the performance.
+ *
+ * Better way to do is do per-thread histogrms parallelly, sort each gray value and reduce by key, then reduce all histograms.
+ * 
+ * 2. Calculate the cumulative distribution function(CDF). Using prefix sum to parallely calculate.
+ *
+ * 3. Calculate the cdfmin, maybe using the reduction tree method? Or this step may combine with the step 2?
+ *
+ * 4. Calculate the histogram equalization value with the given formula
+ */
 
 __global__ void kernel(unsigned char *input, unsigned long int *output_cdf,
                        unsigned char *output, unsigned long int im_size, unsigned long int cdf_min)
@@ -86,25 +85,22 @@ __global__ void kernel(unsigned char *input, unsigned long int *output_cdf,
   float temp2 = round(temp);
   output[location] = int(temp2);
 
-  printf("the first: %f  . the seond: %f  . the final: %d .", temp, temp2, output[location]);
+  printf("the first: %f . the seond: %f . the final: %d .", temp, temp2, output[location]);
 }
 
 /** 
- *  This method will calculate the histogram of the image. 
- *  Three main steps:
- *    1. Replication
- *    2. Padding
- *    3. Interleaved read access
+ * This method will calculate the histogram of the image. 
+ * Three main steps:
+ * 1. Replication
+ * 2. Padding
+ * 3. Interleaved read access
  */
-__global__ void histogram_generation(unsigned int *histogram,
-                                     unsigned char *input,
-                                     int size,
-                                     int BINS,
-                                     int R)
+
+__global__ void histogram_generation(unsigned int *histogram, unsigned char *input, int size)
 {
 
   // allocate shared memory
-  __shared__ int Hs[(BINS + 1) * R];
+  __shared__ int Hs[(NUM_GRAY_LEVELS + 1) * R];
 
   // warp index, lane and number of warps per block
   const int warpid = (int)(threadIdx.x / WARP_SIZE);
@@ -112,7 +108,7 @@ __global__ void histogram_generation(unsigned int *histogram,
   const int warps_block = blockDim.x / WARP_SIZE;
 
   // Offset to per-block sub-histogram
-  const int off_rep = (BINS + 1) * (threadIdx.x % R);
+  const int off_rep = (NUM_GRAY_LEVELS + 1) * (threadIdx.x % R);
 
   // constants for interleaved read access
   const int begin = (size / warps_block) * warpid + WARP_SIZE * blockIdx.x + lane;
@@ -120,7 +116,7 @@ __global__ void histogram_generation(unsigned int *histogram,
   const int step = WARP_SIZE * gridDim.x;
 
   // initialization
-  for (int pos = threadIdx.x; pos < (BINS + 1) * R; pos += blockDim.x)
+  for (int pos = threadIdx.x; pos < (NUM_GRAY_LEVELS + 1) * R; pos += blockDim.x)
     Hs[pos] = 0;
 
   __syncthreads(); // intra-block synchronization
@@ -135,10 +131,10 @@ __global__ void histogram_generation(unsigned int *histogram,
 
   __syncthreads(); // intra-block synchronization
 
-  for (int pos = threadIdx.x; pos < BINS; pos += blockDim.x)
+  for (int pos = threadIdx.x; pos < NUM_GRAY_LEVELS; pos += blockDim.x)
   {
     int sum = 0;
-    for (int base = 0; base < (BINS + 1) * R; base += BINS + 1)
+    for (int base = 0; base < (NUM_GRAY_LEVELS + 1) * R; base += NUM_GRAY_LEVELS + 1)
     {
       sum += Hs[base + pos];
     }
@@ -147,7 +143,7 @@ __global__ void histogram_generation(unsigned int *histogram,
   // int x = blockIdx.x*TILE_SIZE+threadIdx.x;
   // int y = blockIdx.y*TILE_SIZE+threadIdx.y;
 
-  // int location = 	y*TILE_SIZE*gridDim.x+x;
+  // int location =   y*TILE_SIZE*gridDim.x+x;
 
   // atomicAdd(&(output_probability[input[location]]), 1);
   // __syncthreads();
@@ -220,7 +216,7 @@ void histogram_gpu(unsigned char *data,
   TIMER_START(Ktime);
 #endif
 
-  histogram_generation<<<dimGrid, dimBlock>>>(output_probability, input_gpu, size, NUM_GRAY_LEVELS, R);
+  histogram_generation<<<dimGrid, dimBlock>>>(output_probability, input_gpu, size);
   get_cdf<<<dimGrid, dimBlock>>>(output_probability, output_cdf, NUM_GRAY_LEVELS);
 
   checkCuda(cudaPeekAtLastError());
@@ -270,61 +266,61 @@ void histogram_gpu(unsigned char *data,
 
   for (int i = 0; i < NUM_GRAY_LEVELS; i++)
   {
-    std::cout << "Value " << i << " : " << probability_gpu[i] << "  " << cdf_gpu[i] << std::endl;
+    std::cout << "Value " << i << " : " << probability_gpu[i] << " " << cdf_gpu[i] << std::endl;
   }
 
   for (long int i = 0; i < 4990464; i++)
   {
-    std::cout << data[i] << "  ";
+    std::cout << data[i] << " ";
   }
 }
 
 /*
 void histogram_gpu_warmup(unsigned char *data, 
-                   unsigned int height, 
-                   unsigned int width){
-                         
-	int gridXSize = 1 + (( width - 1) / TILE_SIZE);
-	int gridYSize = 1 + ((height - 1) / TILE_SIZE);
-	
-	int XSize = gridXSize*TILE_SIZE;
-	int YSize = gridYSize*TILE_SIZE;
-	
-	// Both are the same size (CPU/GPU).
-	int size = XSize*YSize;
-	
-	// Allocate arrays in GPU memory
-	checkCuda(cudaMalloc((void**)&input_gpu   , size*sizeof(unsigned char)));
-	checkCuda(cudaMalloc((void**)&output_gpu  , size*sizeof(unsigned char)));
-	
-    checkCuda(cudaMemset(output_gpu , 0 , size*sizeof(unsigned char)));
-            
-    // Copy data to GPU
-    checkCuda(cudaMemcpy(input_gpu, 
-        data, 
-        size*sizeof(char), 
-        cudaMemcpyHostToDevice));
+ unsigned int height, 
+ unsigned int width){
+ 
+  int gridXSize = 1 + (( width - 1) / TILE_SIZE);
+  int gridYSize = 1 + ((height - 1) / TILE_SIZE);
+  
+  int XSize = gridXSize*TILE_SIZE;
+  int YSize = gridYSize*TILE_SIZE;
+  
+  // Both are the same size (CPU/GPU).
+  int size = XSize*YSize;
+  
+  // Allocate arrays in GPU memory
+  checkCuda(cudaMalloc((void**)&input_gpu , size*sizeof(unsigned char)));
+  checkCuda(cudaMalloc((void**)&output_gpu , size*sizeof(unsigned char)));
+  
+ checkCuda(cudaMemset(output_gpu , 0 , size*sizeof(unsigned char)));
+ 
+ // Copy data to GPU
+ checkCuda(cudaMemcpy(input_gpu, 
+ data, 
+ size*sizeof(char), 
+ cudaMemcpyHostToDevice));
 
-	checkCuda(cudaDeviceSynchronize());
-        
-    // Execute algorithm
-        
-	dim3 dimGrid(gridXSize, gridYSize);
-    dim3 dimBlock(TILE_SIZE, TILE_SIZE);
-    
-    kernel<<<dimGrid, dimBlock>>>(input_gpu, 
-                                  output_gpu);
-                                         
-    checkCuda(cudaDeviceSynchronize());
-        
-	// Retrieve results from the GPU
-	checkCuda(cudaMemcpy(data, 
-			output_gpu, 
-			size*sizeof(unsigned char), 
-			cudaMemcpyDeviceToHost));
-                        
-    // Free resources and end the program
-	checkCuda(cudaFree(output_gpu));
-	checkCuda(cudaFree(input_gpu));
+  checkCuda(cudaDeviceSynchronize());
+ 
+ // Execute algorithm
+ 
+  dim3 dimGrid(gridXSize, gridYSize);
+ dim3 dimBlock(TILE_SIZE, TILE_SIZE);
+ 
+ kernel<<<dimGrid, dimBlock>>>(input_gpu, 
+ output_gpu);
+ 
+ checkCuda(cudaDeviceSynchronize());
+ 
+  // Retrieve results from the GPU
+  checkCuda(cudaMemcpy(data, 
+      output_gpu, 
+      size*sizeof(unsigned char), 
+      cudaMemcpyDeviceToHost));
+ 
+ // Free resources and end the program
+  checkCuda(cudaFree(output_gpu));
+  checkCuda(cudaFree(input_gpu));
 
 }*/
