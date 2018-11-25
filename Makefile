@@ -9,13 +9,15 @@ RM = rm -f
  
 # Specify opencv Installation
 #opencvLocation = /usr/local/opencv
-opencvLIB= -L/shared/apps/opencv-3.0.0-beta/INSTALL/lib
-opencvINC= -I/shared/apps/opencv-3.0.0-beta/INSTALL/include
+# opencvLIB= -L/shared/apps/opencv-3.0.0-beta/INSTALL/lib
+# opencvINC= -I/shared/apps/opencv-3.0.0-beta/INSTALL/include
+opencvLIB= -L/usr/local/lib
+opencvINC= -L/usr/local/include/opencv2
 
 # Compiler flags:
 # -g    debugging information
 # -Wall turns on most compiler warnings
-GENCODE_FLAGS := -gencode arch=compute_$(SM),code=sm_$(SM)
+GENCODE_FLAGS := -gencode arch=compute_$(SM),code=compute_$(SM)
 LIB_FLAGS := -lcudadevrt -lcudart
 
 NVCCFLAGS :=

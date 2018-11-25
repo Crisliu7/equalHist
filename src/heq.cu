@@ -21,7 +21,7 @@
   cudaEventDestroy(t##_start);                  \
   cudaEventDestroy(t##_end);
 
-#define TILE_SIZE 256
+#define TILE_SIZE 16
 #define NUM_GRAY_LEVELS 256
 #define CUDA_TIMING
 #define DEBUG
@@ -169,14 +169,16 @@ void histogram_gpu(unsigned char *data,
                    unsigned int width)
 {
 
-  int gridXSize = 1 + ((width - 1) / TILE_SIZE);
-  int gridYSize = 1 + ((height - 1) / TILE_SIZE);
+  // int gridXSize = 1 + ((width - 1) / TILE_SIZE);
+  // int gridYSize = 1 + ((height - 1) / TILE_SIZE);
 
-  int XSize = gridXSize * TILE_SIZE;
-  int YSize = gridYSize * TILE_SIZE;
+  // int XSize = gridXSize * TILE_SIZE;
+  // int YSize = gridYSize * TILE_SIZE;
 
   // Both are the same size (CPU/GPU).
-  int size = XSize * YSize;
+  // int size = XSize * YSize;
+  int size = width * height;
+  int gridSize = 1 + ((size - 1) / TILE_SIZE);
 
   // CPU
   unsigned int *probability_gpu = new unsigned int[NUM_GRAY_LEVELS];
@@ -206,8 +208,10 @@ void histogram_gpu(unsigned char *data,
 
   // Execute algorithm
 
-  dim3 dimGrid(gridXSize, gridYSize);
-  dim3 dimBlock(TILE_SIZE, TILE_SIZE);
+  // dim3 dimGrid(gridXSize, gridYSize);
+  // dim3 dimBlock(TILE_SIZE, TILE_SIZE);
+  dim3 dimGrid(gridSize);
+  dim3 dimBlock(TILE_SIZE);
 
 // Kernel Call
 #if defined(CUDA_TIMING)
