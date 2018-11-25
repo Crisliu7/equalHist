@@ -21,12 +21,12 @@
   cudaEventDestroy(t##_start);                  \
   cudaEventDestroy(t##_end);
 
-#define TILE_SIZE 16
+#define TILE_SIZE 512
 #define NUM_GRAY_LEVELS 256
 #define CUDA_TIMING
 #define DEBUG
 #define WARP_SIZE 32
-#define R 8
+#define R 32
 
 unsigned char *input_gpu;
 unsigned char *output_gpu;
@@ -70,23 +70,9 @@ inline cudaError_t checkCuda(cudaError_t result)
  * 3. Calculate the cdfmin, maybe using the reduction tree method? Or this step may combine with the step 2?
  *
  * 4. Calculate the histogram equalization value with the given formula
+ * 
+ * 5. Put the calculated value back to 
  */
-
-__global__ void kernel(unsigned char *input, unsigned long int *output_cdf,
-                       unsigned char *output, unsigned long int im_size, unsigned long int cdf_min)
-{
-
-  int x = blockIdx.x * TILE_SIZE + threadIdx.x;
-  int y = blockIdx.y * TILE_SIZE + threadIdx.y;
-
-  int location = y * TILE_SIZE * gridDim.x + x;
-
-  float temp = (output_cdf[input[location]] - cdf_min) / (im_size - cdf_min) * (NUM_GRAY_LEVELS - 1);
-  float temp2 = round(temp);
-  output[location] = int(temp2);
-
-  printf("the first: %f . the seond: %f . the final: %d .", temp, temp2, output[location]);
-}
 
 /** 
  * This method will calculate the histogram of the image. 
@@ -106,6 +92,7 @@ __global__ void histogram_generation(unsigned int *histogram, unsigned char *inp
   const int warpid = (int)(threadIdx.x / WARP_SIZE);
   const int lane = threadIdx.x % WARP_SIZE;
   const int warps_block = blockDim.x / WARP_SIZE;
+  // printf("warpid: %d lane: %d warps_block: %d", warpid, lane, warps_block);
 
   // Offset to per-block sub-histogram
   const int off_rep = (NUM_GRAY_LEVELS + 1) * (threadIdx.x % R);
@@ -145,23 +132,99 @@ __global__ void histogram_generation(unsigned int *histogram, unsigned char *inp
 
   // int location =   y*TILE_SIZE*gridDim.x+x;
 
-  // atomicAdd(&(output_probability[input[location]]), 1);
+  // unsigned int location = blockDim.x * blockIdx.x + threadIdx.x;
+  // atomicAdd(&(histogram[input[location]]), 1);
   // __syncthreads();
 }
 
-__global__ void get_cdf(unsigned int *output_probability, unsigned long int *output_cdf, int n)
+// __global__ void get_cdf(unsigned int *histogram, unsigned long int *intensity_probability, int n)
+// {
+//   unsigned int d_hist_idx = blockDim.x * blockIdx.x + threadIdx.x;
+//   if (d_hist_idx == 0 || d_hist_idx >= n)
+//   {
+//     return;
+//   }
+//   unsigned int cdf_val = 0;
+//   for (int i = 0; i <= d_hist_idx; ++i)
+//   {
+//     cdf_val = cdf_val + histogram[i];
+//   }
+//   intensity_probability[d_hist_idx] = cdf_val;
+// }
+
+/** TODO: 
+ * prefix sum using hillis and steele algorithm
+ */
+
+__global__ void prefixSum(float *g_idata, int n)
 {
-  unsigned int d_hist_idx = blockDim.x * blockIdx.x + threadIdx.x;
-  if (d_hist_idx == 0 || d_hist_idx >= n)
+  extern __shared__ float temp[]; // allocated on invocation
+  int thid = threadIdx.x;
+  int pout = 0, pin = 1;
+  // Load input into shared memory.
+  // This is exclusive scan, so shift right by one
+  // and set first element to 0
+  temp[pout * n + thid] = (thid > 0) ? g_idata[thid - 1] : 0;
+  __syncthreads();
+  for (int offset = 1; offset < n; offset *= 2)
   {
-    return;
+    pout = 1 - pout; // swap double buffer indices
+    pin = 1 - pout;
+    if (thid >= offset)
+      temp[pout * n + thid] += temp[pin * n + thid - offset];
+    else
+      temp[pout * n + thid] = temp[pin * n + thid];
+    __syncthreads();
   }
-  unsigned int cdf_val = 0;
-  for (int i = 0; i <= d_hist_idx; ++i)
+  g_idata[thid] = temp[pout * n + thid]; // write output
+}
+
+/** TODO: 
+ * find minimum value of cdf
+ */
+__global__ void get_minimum_cdf(unsigned int *cdf,
+                                unsigned int cdf_min)
+{
+}
+
+/**
+ * Calculate the probability of each bin's intensity based on the given cdf array
+ * @param {unsighed int*} cdf: the array of cdf
+ * @param {float*} intensity_probability: the array of probability of each bin's intensity
+ * @param {unsigned int} size: image size
+ * @param {unsighed int} cdf_min: the minimum value of the cdf
+ */
+__global__ void calculate_probability(unsigned int *cdf,
+                                      float *intensity_probability,
+                                      unsigned int img_size,
+                                      unsigned int *cdf_min)
+{
+  unsigned int index = threadIdx.x;
+  if (index < NUM_GRAY_LEVELS)
   {
-    cdf_val = cdf_val + output_probability[i];
+    intensity_probability[index] = ((float)(cdf[index] - *cdf_min)) / (img_size - *cdf_min);
   }
-  output_cdf[d_hist_idx] = cdf_val;
+}
+
+/**
+ * Finish the histogram equalization by calculating the normalized value, and set them in the output array
+ * @param {unsighed char*} input: the array of original grayscale value of the image
+ * @param {unsigned char*} output: the array of after histogram equalization grayscale value of the image
+ * @param {unsigned int} size: image size
+ * @param {float*} intensity_probability: the array of probability of each bin's intensity
+ */
+__global__ void historam_equalization(unsigned char *input,
+                                      unsigned char *output,
+                                      unsigned int img_size,
+                                      float *intensity_probability)
+{
+
+  unsigned int location = blockIdx.x * blockDim.x + threadIdx.x;
+  if (location < img_size)
+  {
+    output[location] = (unsigned char)(intensity_probability[input[location]] * (NUM_GRAY_LEVELS - 1));
+  }
+  printf("the final: %d .", output[location]);
 }
 
 void histogram_gpu(unsigned char *data,
@@ -180,29 +243,30 @@ void histogram_gpu(unsigned char *data,
   int size = width * height;
   int gridSize = 1 + ((size - 1) / TILE_SIZE);
 
-  // CPU
-  unsigned int *probability_gpu = new unsigned int[NUM_GRAY_LEVELS];
-  unsigned long int *cdf_gpu = new unsigned long int[NUM_GRAY_LEVELS];
+  // // CPU
+  // unsigned int *intensity_probability_cpu = new unsigned int[NUM_GRAY_LEVELS];
+  // float *cdf_gpu = new unsigned long int[NUM_GRAY_LEVELS];
 
   // GPU
-  unsigned int *output_probability;
-  unsigned long int *output_cdf;
+  unsigned int *histogram;
+  float *intensity_probability;
+  unsigned int *cdf_min;
 
   // Allocate arrays in GPU memory
   checkCuda(cudaMalloc((void **)&input_gpu, size * sizeof(unsigned char)));
   checkCuda(cudaMalloc((void **)&output_gpu, size * sizeof(unsigned char)));
-  checkCuda(cudaMalloc((void **)&output_probability, NUM_GRAY_LEVELS * sizeof(unsigned int)));
-  checkCuda(cudaMalloc((void **)&output_cdf, NUM_GRAY_LEVELS * sizeof(unsigned long int)));
+  checkCuda(cudaMalloc((void **)&histogram, NUM_GRAY_LEVELS * sizeof(unsigned int)));
+  checkCuda(cudaMalloc((void **)&intensity_probability, NUM_GRAY_LEVELS * sizeof(float)));
+  checkCuda(cudaMalloc((void **)&cdf_min, sizeof(unsigned int)));
 
-  checkCuda(cudaMemset(output_probability, 0, NUM_GRAY_LEVELS * sizeof(unsigned int)));
-  checkCuda(cudaMemset(output_cdf, 0, NUM_GRAY_LEVELS * sizeof(unsigned long int)));
-  checkCuda(cudaMemset(output_gpu, 0, size * sizeof(unsigned char)));
-
-  // Copy data to GPU
+  // Copy data to GPU, data initialization
   checkCuda(cudaMemcpy(input_gpu,
                        data,
                        size * sizeof(char),
                        cudaMemcpyHostToDevice));
+  checkCuda(cudaMemset(histogram, 0, NUM_GRAY_LEVELS * sizeof(unsigned int)));
+  checkCuda(cudaMemset(intensity_probability, 0, NUM_GRAY_LEVELS * sizeof(float)));
+  checkCuda(cudaMemset(cdf_min, 0, sizeof(unsigned int)));
 
   checkCuda(cudaDeviceSynchronize());
 
@@ -220,8 +284,16 @@ void histogram_gpu(unsigned char *data,
   TIMER_START(Ktime);
 #endif
 
-  histogram_generation<<<dimGrid, dimBlock>>>(output_probability, input_gpu, size);
-  get_cdf<<<dimGrid, dimBlock>>>(output_probability, output_cdf, NUM_GRAY_LEVELS);
+  //step1
+  histogram_generation<<<dimGrid, dimBlock>>>(histogram, input_gpu, size);
+  //TODO: step2
+  // prefixSum<<<dimGrid, dimBlock>>>(histogram);
+  //TODO: step3-find minimum value
+  // get_minimum_cdf<<<1, 1>>>(histogram, cdf_min);
+  //step4
+  calculate_probability<<<1, 256>>>(histogram, intensity_probability, size, cdf_min);
+  //step5
+  historam_equalization<<<dimGrid, dimBlock>>>(input_gpu, output_gpu, size, intensity_probability);
 
   checkCuda(cudaPeekAtLastError());
   checkCuda(cudaDeviceSynchronize());
@@ -232,51 +304,49 @@ void histogram_gpu(unsigned char *data,
 #endif
 
   // Retrieve results from the GPU
-
-  checkCuda(cudaMemcpy(probability_gpu,
-                       output_probability,
-                       NUM_GRAY_LEVELS * sizeof(unsigned int),
-                       cudaMemcpyDeviceToHost));
-
-  checkCuda(cudaMemcpy(cdf_gpu,
-                       output_cdf,
-                       NUM_GRAY_LEVELS * sizeof(unsigned long int),
-                       cudaMemcpyDeviceToHost));
-  // Free resources and end the program
-
-  int cdf_min;
-  for (int i = 0; i < NUM_GRAY_LEVELS; i++)
-  {
-    if (cdf_gpu[i] != 0)
-    {
-      cdf_min = cdf_gpu[i];
-    }
-  }
-
-  std::cout << "cdf min : " << cdf_min << std::endl;
-
-  kernel<<<dimGrid, dimBlock>>>(input_gpu, output_cdf, output_gpu, width * height, cdf_min);
-  checkCuda(cudaPeekAtLastError());
-  checkCuda(cudaDeviceSynchronize());
   checkCuda(cudaMemcpy(data,
                        output_gpu,
                        size * sizeof(unsigned char),
                        cudaMemcpyDeviceToHost));
 
-  checkCuda(cudaFree(output_probability));
-  checkCuda(cudaFree(output_cdf));
   checkCuda(cudaFree(output_gpu));
   checkCuda(cudaFree(input_gpu));
+  checkCuda(cudaFree(histogram));
+  checkCuda(cudaFree(intensity_probability));
+  checkCuda(cudaFree(cdf_min));
 
-  for (int i = 0; i < NUM_GRAY_LEVELS; i++)
-  {
-    std::cout << "Value " << i << " : " << probability_gpu[i] << " " << cdf_gpu[i] << std::endl;
-  }
+  // checkCuda(cudaMemcpy(intensity_probability_cpu,
+  //                      histogram,
+  //                      NUM_GRAY_LEVELS * sizeof(unsigned int),
+  //                      cudaMemcpyDeviceToHost));
 
-  for (long int i = 0; i < 4990464; i++)
-  {
-    std::cout << data[i] << " ";
-  }
+  // checkCuda(cudaMemcpy(cdf_gpu,
+  //                      intensity_probability,
+  //                      NUM_GRAY_LEVELS * sizeof(unsigned long int),
+  //                      cudaMemcpyDeviceToHost));
+
+  // Free resources and end the program
+
+  // int cdf_min;
+  // for (int i = 0; i < NUM_GRAY_LEVELS; i++)
+  // {
+  //   if (cdf_gpu[i] != 0)
+  //   {
+  //     cdf_min = cdf_gpu[i];
+  //   }
+  // }
+
+  // std::cout << "cdf min : " << cdf_min << std::endl;
+
+  // for (int i = 0; i < NUM_GRAY_LEVELS; i++)
+  // {
+  //   std::cout << "Value " << i << " : " << intensity_probability_cpu[i] << " " << cdf_gpu[i] << std::endl;
+  // }
+
+  // for (long int i = 0; i < 4990464; i++)
+  // {
+  //   std::cout << data[i] << " ";
+  // }
 }
 
 /*

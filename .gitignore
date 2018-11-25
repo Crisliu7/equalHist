@@ -5,6 +5,7 @@
 *.ptx
 *.cubin
 *.fatbin
+heq
 
 # C++
 
