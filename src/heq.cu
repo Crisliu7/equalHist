@@ -28,6 +28,7 @@
 #define NUM_GRAY_LEVELS 256
 #define CUDA_TIMING
 #define DEBUG
+#define R 8 // replicate factor
 
 unsigned char *input_gpu;
 unsigned char *output_gpu;
@@ -87,16 +88,63 @@ __global__ void kernel(unsigned char *input, unsigned long int *output_cdf,
 
 }
 
-__global__ void cal(unsigned char *input, 
-                             unsigned int *output_probability){
+/** 
+ *  This method will calculate the histogram of the image. 
+ *  Three main steps:
+ *    1. Replication
+ *    2. Padding
+ *    3. Interleaved read access
+ */
+__global__ void histogram_generation(unsigned int *histogram,
+                                     unsigned char *input,
+                                     int size,
+                                     int BINS,
+                                     int R){
     
-    int x = blockIdx.x*TILE_SIZE+threadIdx.x;
-    int y = blockIdx.y*TILE_SIZE+threadIdx.y;
+    // allocate shared memory
+    __shared__ int Hs[(BINS + 1) * R];
 
-    int location = 	y*TILE_SIZE*gridDim.x+x;
+    // warp index, lane and number of warps per block
+    const int warpid = (int)(threadIdx.x / WARP_SIZE);
+    const int lane = threadIdx.x % WARP_SIZE;
+    const int warps_block = blockDim.x / WARP_SIZE;
+
+    // Offset to per-block sub-histogram
+    const int off_rep = (BINS + 1) * (threadIdx.x % R);
+
+    // constants for interleaved read access
+    const int begin = (size / warps_block) * warpid + WARP_SIZE * blockIdx.x + lane;
+    const int end = (size / warps_block) * (warpid + 1);
+    const int step = WARP_SIZE * gridDim.x;
+
+    // initialization
+    for(int pos = threadIdx.x; pos < (BINS + 1) * R; pos += blockDim.x) Hs[pos] = 0;
+
+    __syncthreads(); // intra-block synchronization
+
+    // main loop
+    for(int i = begin; i < end; i += step) {
+      int d = input[i]; // global memory read
+
+      atomicAdd(&Hs[off_rep + d], 1); // vote in shared memory
+    }
+
+    __syncthreads(); // intra-block synchronization
+
+    for(int pos = threadIdx.x; pos < BINS; pos += blockDim.x) {
+      int sum = 0;
+      for(int base = 0; base < (BINS + 1) * R; base += BINS + 1) {
+        sum += Hs[base + pos];
+      }
+      atomicAdd(histogram + pos, sum);
+    }
+    // int x = blockIdx.x*TILE_SIZE+threadIdx.x;
+    // int y = blockIdx.y*TILE_SIZE+threadIdx.y;
+
+    // int location = 	y*TILE_SIZE*gridDim.x+x;
     
-    atomicAdd(&(output_probability[input[location]]), 1);
-    __syncthreads();
+    // atomicAdd(&(output_probability[input[location]]), 1);
+    // __syncthreads();
     
 }
 
@@ -168,8 +216,8 @@ void histogram_gpu(unsigned char *data,
 		TIMER_START(Ktime);
 	#endif
         
-   get_probability<<<dimGrid, dimBlock>>>(input_gpu, output_probability);
-   get_cdf<<<dimGrid, dimBlock>>>(output_probability, output_cdf, NUM_GRAY_LEVELS);
+  checkCuda(histogram_generation<<<dimGrid, dimBlock>>>(input_gpu, output_probability, size, NUM_GRAY_LEVELS, R));
+  checkCuda(get_cdf<<<dimGrid, dimBlock>>>(output_probability, output_cdf, NUM_GRAY_LEVELS));
 
         
         
