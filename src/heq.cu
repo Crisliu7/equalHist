@@ -63,11 +63,12 @@ __global__ void kernel(unsigned char *input, unsigned long int *output_cdf,
 
     int location = 	y*TILE_SIZE*gridDim.x+x;
     
-    float temp = (output_cdf[input[location]] - cdf_min)/(im_size - cdf_min)*(NUM_GRAY_LEVELS - 1);
-    float temp2 = round(temp) ;
-    output[location] = int(temp2);
     
-    printf("the first: %f  . the seond: %f  . the final: %d .", temp, temp2, output[location]);
+    // float temp = float(output_cdf[input[location]] - cdf_min)/float(im_size - cdf_min) * (NUM_GRAY_LEVELS - 1);
+    // output[location] = round(temp);
+    output[location] = round(float(output_cdf[input[location]] - cdf_min)/float(im_size - cdf_min) * (NUM_GRAY_LEVELS - 1));
+    
+    //printf("the final: %d .", int(output[location]));
 
 }
 
@@ -160,10 +161,7 @@ void histogram_gpu(unsigned char *data,
         checkCuda(cudaPeekAtLastError());                                     
         checkCuda(cudaDeviceSynchronize());
 	
-	#if defined(CUDA_TIMING)
-		TIMER_END(Ktime);
-		printf("Kernel Execution Time: %f ms\n", Ktime);
-	#endif
+
         
 	// Retrieve results from the GPU
 
@@ -190,7 +188,15 @@ void histogram_gpu(unsigned char *data,
 
   kernel<<<dimGrid, dimBlock>>>(input_gpu, output_cdf, output_gpu, width*height, cdf_min);
   checkCuda(cudaPeekAtLastError());                                     
-  checkCuda(cudaDeviceSynchronize());     
+  checkCuda(cudaDeviceSynchronize());   
+  
+  
+	#if defined(CUDA_TIMING)
+		TIMER_END(Ktime);
+		printf("Kernel Execution Time: %f ms\n", Ktime);
+	#endif
+
+
 	checkCuda(cudaMemcpy(data, 
 			output_gpu, 
 			size*sizeof(unsigned char), 
@@ -201,13 +207,13 @@ void histogram_gpu(unsigned char *data,
 	checkCuda(cudaFree(output_gpu));
 	checkCuda(cudaFree(input_gpu));
  
-  for(int i = 0; i < NUM_GRAY_LEVELS; i++){
-    std::cout << "Value " << i << " : " << probability_gpu[i] << "  " << cdf_gpu[i] << std::endl;
-  }
+  // for(int i = 0; i < NUM_GRAY_LEVELS; i++){
+  //   std::cout << "Value " << i << " : " << probability_gpu[i] << "  " << cdf_gpu[i] << std::endl;
+  // }
   
-  for (long int i = 0; i < 4990464; i++){
-    std::cout << data[i] << "  ";
-  }
+  // for (long int i = 0; i < 4990464; i++){
+  //   std::cout << data[i] << "  ";
+  // }
 
 }
 
