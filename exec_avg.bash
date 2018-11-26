@@ -46,3 +46,32 @@ echo "    Ker Average: $kernel_avg"
 echo "    Dif Average: $diff_avg"
 
 
+# large image
+image="input/Wikidata_Map_April_2016_Huge.png"
+
+echo "------------------------------"
+echo "Running tests..."
+echo "------------------------------"
+echo "------------------------------"
+echo ""
+
+rm -rf run_exec.log
+
+for ((i=1; i<= iterations; i++))
+do
+    echo "Running Trial $i"
+    ./heq $image &>> run_exec.log
+done
+
+cpu_avg=`grep "CPU" run_exec.log | awk '{ sum += $4; n++} END {if (n > 0) print sum/n}'`
+gpu_avg=`grep "GPU" run_exec.log | awk '{ sum += $4; n++} END {if (n > 0) print sum/n}'`
+kernel_avg=`grep "Kernel" run_exec.log | awk '{ sum += $4; n++} END {if (n > 0) print sum/n}'`
+diff_avg=`grep "Percentage" run_exec.log | awk '{ sum += $3; n++} END {if (n > 0) print sum/n}'`
+
+echo "------------------------------"
+echo "Results"
+echo "    CPU Average: $cpu_avg"
+echo "    GPU Average: $gpu_avg"
+echo "    Ker Average: $kernel_avg"
+echo "    Dif Average: $diff_avg"
+
