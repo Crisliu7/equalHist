@@ -95,84 +95,39 @@ __global__ void get_histogram(unsigned char *input,
   //__syncthreads();
 }
 
-__global__ void histogram_gmem_atomics(unsigned char *input, int width, int height, unsigned int *output)
-{
-  // pixel coordinates
-  int x = blockIdx.x * blockDim.x + threadIdx.x;
-  int y = blockIdx.y * blockDim.y + threadIdx.y;
+// __global__ void histogram_gmem_atomics(unsigned char *input, int width, int height, unsigned int *output)
+// {
+//   // pixel coordinates
+//   int x = blockIdx.x * blockDim.x + threadIdx.x;
+//   int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-  // grid dimensions
-  int nx = blockDim.x * gridDim.x;
-  int ny = blockDim.y * gridDim.y;
+//   // grid dimensions
+//   int nx = blockDim.x * gridDim.x;
+//   int ny = blockDim.y * gridDim.y;
 
-  // linear thread index within 2D block
-  int t = threadIdx.x + threadIdx.y * blockDim.x;
+//   // linear thread index within 2D block
+//   int t = threadIdx.x + threadIdx.y * blockDim.x;
 
-  // total threads in 2D block
-  int nt = blockDim.x * blockDim.y;
+//   // total threads in 2D block
+//   int nt = blockDim.x * blockDim.y;
 
-  // linear block index within 2D grid
-  int g = blockIdx.x + blockIdx.y * gridDim.x;
+//   // linear block index within 2D grid
+//   int g = blockIdx.x + blockIdx.y * gridDim.x;
 
-  // initialize temporary accumulation array in global memory
-  unsigned int *gmem = out + g * NUM_PARTS;
-  for (int i = t; i < NUM_BINS; i += nt)
-    gmem[i] = 0;
+//   // initialize temporary accumulation array in global memory
+//   unsigned int *gmem = out + g * NUM_PARTS;
+//   for (int i = t; i < NUM_BINS; i += nt)
+//     gmem[i] = 0;
 
-  // process pixels
-  // updates our block's partial histogram in global memory
-  for (int col = x; col < width; col += nx)
-    for (int row = y; row < height; row += ny)
-    {
+//   // process pixels
+//   // updates our block's partial histogram in global memory
+//   for (int col = x; col < width; col += nx)
+//     for (int row = y; row < height; row += ny)
+//     {
 
-      atomicAdd(&gmem[input[row * width + col]], 1);
-    }
-}
-
-template <bool bPeriodicMerge>
-__global__ void
-histogram1DPerThread4x64(
-    unsigned int *output_histogram,
-    const unsigned char *input, int N)
-{
-  extern __shared__ unsigned int privHist[];
-  const int blockDimx = 64;
-
-  if (blockDim.x != blockDimx)
-    return;
-
-  for (int i = threadIdx.x;
-       i < 64 * blockDimx;
-       i += blockDimx)
-  {
-    privHist[i] = 0;
-  }
-  __syncthreads();
-  int cIterations = 0;
-  for (int i = blockIdx.x * blockDimx + threadIdx.x;
-       i < N / 4;
-       i += blockDimx * gridDim.x)
-  {
-    unsigned int value = ((unsigned int *)input)[i];
-    incPrivatized32Element(value & 0xff);
-    value >>= 8;
-    incPrivatized32Element(value & 0xff);
-    value >>= 8;
-    incPrivatized32Element(value & 0xff);
-    value >>= 8;
-    incPrivatized32Element(value);
-    cIterations += 1;
-    if (bPeriodicMerge && cIterations >= 252 / 4)
-    {
-      cIterations = 0;
-      __syncthreads();
-      merge64HistogramsToOutput<true>(output_histogram);
-    }
-  }
-  __syncthreads();
-
-  merge64HistogramsToOutput<false>(output_histogram);
-}
+//       atomicAdd(&gmem[input[row * width + col]], 1);
+//     }
+// }
 
 inline __device__ void
 incPrivatized32Element(unsigned char pixval)
@@ -210,6 +165,50 @@ merge64HistogramsToOutput(unsigned int *output_histogram)
   atomicAdd(&output_histogram[threadIdx.x * 4 + 1], sum13 & 0xffff);
   sum13 >>= 16;
   atomicAdd(&output_histogram[threadIdx.x * 4 + 3], sum13);
+}
+
+__global__ void
+histogram1DPerThread4x64(
+    unsigned int *output_histogram,
+    const unsigned char *input, int N)
+{
+  extern __shared__ unsigned int privHist[];
+  const int blockDimx = 64;
+
+  if (blockDim.x != blockDimx)
+    return;
+
+  for (int i = threadIdx.x;
+       i < 64 * blockDimx;
+       i += blockDimx)
+  {
+    privHist[i] = 0;
+  }
+  __syncthreads();
+  int cIterations = 0;
+  for (int i = blockIdx.x * blockDimx + threadIdx.x;
+       i < N / 4;
+       i += blockDimx * gridDim.x)
+  {
+    unsigned int value = ((unsigned int *)input)[i];
+    incPrivatized32Element(value & 0xff);
+    value >>= 8;
+    incPrivatized32Element(value & 0xff);
+    value >>= 8;
+    incPrivatized32Element(value & 0xff);
+    value >>= 8;
+    incPrivatized32Element(value);
+    cIterations += 1;
+    if (false && cIterations >= 252 / 4)
+    {
+      cIterations = 0;
+      __syncthreads();
+      merge64HistogramsToOutput<true>(output_histogram);
+    }
+  }
+  __syncthreads();
+
+  merge64HistogramsToOutput<false>(output_histogram);
 }
 
 __global__ void get_cdf(unsigned int *output_histogram,
@@ -273,7 +272,7 @@ void histogram_gpu(unsigned char *data,
   unsigned int *output_histogram;
   unsigned int *output_cdf;
 
-  bool bPeriodicMerge = true;
+  bool bPeriodicMerge = false;
   dim3 threads(16, 4, 1);
   int numthreads = threads.x * threads.y;
   int numblocks = bPeriodicMerge ? 256 : INTDIVIDE_CEILING(size, numthreads * (255 / 4));
@@ -317,7 +316,7 @@ void histogram_gpu(unsigned char *data,
   //histogram_generation<<<5,256>>>(output_histogram, input_gpu, width*height);
   //histogram256Kernel<<<gridXSize*gridYSize, 256>>>(output_histogram, input_gpu, width*height);
   // get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_histogram);
-  histogram1DPerThread4x64<bPeriodicMerge><<<numblocks, numthreads, numthreads * 256>>>(output_histogram, input_gpu, size);
+  histogram1DPerThread4x64<<<numblocks, numthreads, numthreads * 256>>>(output_histogram, input_gpu, size);
   get_cdf<<<dimGrid1D, dimBlock1D>>>(output_histogram, output_cdf, NUM_BINS);
 
   checkCuda(cudaPeekAtLastError());
