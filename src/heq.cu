@@ -62,7 +62,7 @@ inline cudaError_t checkCuda(cudaError_t result)
 // Add GPU kernel and functions
 // HERE!!!
 
-__global__ void kernel(unsigned char *input, unsigned int *output_cdf,
+__global__ void kernel(unsigned char *input, unsigned int *histogram,
                        unsigned char *output,
                        unsigned int im_size, unsigned int *cdf_min)
 {
@@ -72,14 +72,14 @@ __global__ void kernel(unsigned char *input, unsigned int *output_cdf,
 
   int location = y * TILE_SIZE * gridDim.x + x;
 
-  //float temp = float(output_cdf[input[location]] - cdf_min)/float(im_size - cdf_min) * (NUM_BINS - 1);
+  //float temp = float(histogram[input[location]] - cdf_min)/float(im_size - cdf_min) * (NUM_BINS - 1);
   //output[location] = round(temp);
-  output[location] = (unsigned char)(float(output_cdf[input[location]] - *cdf_min) / (im_size - *cdf_min) * (NUM_BINS - 1));
+  output[location] = (unsigned char)(float(histogram[input[location]] - *cdf_min) / (im_size - *cdf_min) * (NUM_BINS - 1));
   //printf("the final: %d .", int(output[location]));
 }
 
 __global__ void get_histogram(unsigned char *input,
-                              unsigned int *output_histogram)
+                              unsigned int *histogram)
 {
 
   int x = blockIdx.x * TILE_SIZE + threadIdx.x;
@@ -89,7 +89,7 @@ __global__ void get_histogram(unsigned char *input,
   {
     int location = y * TILE_SIZE * gridDim.x + x;
 
-    atomicAdd(&(output_histogram[input[location]]), 1);
+    atomicAdd(&(histogram[input[location]]), 1);
   }
 
   //__syncthreads();
@@ -141,7 +141,7 @@ incPrivatized32Element(unsigned char pixval)
 
 template <bool bClear>
 __device__ void
-merge64HistogramsToOutput(unsigned int *output_histogram)
+merge64HistogramsToOutput(unsigned int *histogram)
 {
   extern __shared__ unsigned int privHist[];
 
@@ -158,18 +158,18 @@ merge64HistogramsToOutput(unsigned int *output_histogram)
     sum13 += myValue & 0xff00ff;
   }
 
-  atomicAdd(&output_histogram[threadIdx.x * 4 + 0], sum02 & 0xffff);
+  atomicAdd(&histogram[threadIdx.x * 4 + 0], sum02 & 0xffff);
   sum02 >>= 16;
-  atomicAdd(&output_histogram[threadIdx.x * 4 + 2], sum02);
+  atomicAdd(&histogram[threadIdx.x * 4 + 2], sum02);
 
-  atomicAdd(&output_histogram[threadIdx.x * 4 + 1], sum13 & 0xffff);
+  atomicAdd(&histogram[threadIdx.x * 4 + 1], sum13 & 0xffff);
   sum13 >>= 16;
-  atomicAdd(&output_histogram[threadIdx.x * 4 + 3], sum13);
+  atomicAdd(&histogram[threadIdx.x * 4 + 3], sum13);
 }
 
 __global__ void
 histogram1DPerThread4x64(
-    unsigned int *output_histogram,
+    unsigned int *histogram,
     const unsigned char *input, int N)
 {
   extern __shared__ unsigned int privHist[];
@@ -203,12 +203,12 @@ histogram1DPerThread4x64(
     {
       cIterations = 0;
       __syncthreads();
-      merge64HistogramsToOutput<true>(output_histogram);
+      merge64HistogramsToOutput<true>(histogram);
     }
   }
   __syncthreads();
 
-  merge64HistogramsToOutput<false>(output_histogram);
+  merge64HistogramsToOutput<false>(histogram);
 }
 
 __global__ void
@@ -241,8 +241,7 @@ histogram1DPerBlock(
     }
 }
 
-__global__ void get_cdf(unsigned int *output_histogram,
-                        unsigned int *output_cdf,
+__global__ void get_cdf(unsigned int *histogram,
                         int n)
 {
   unsigned int d_hist_idx = blockDim.x * blockIdx.x + threadIdx.x;
@@ -253,12 +252,12 @@ __global__ void get_cdf(unsigned int *output_histogram,
   unsigned int cdf_val = 0;
   for (int i = 0; i <= d_hist_idx; ++i)
   {
-    cdf_val = cdf_val + output_histogram[i];
+    cdf_val = cdf_val + histogram[i];
   }
-  output_cdf[d_hist_idx] = cdf_val;
+  histogram[d_hist_idx] = cdf_val;
 }
 
-__global__ void prefixSum(unsigned int *histogram, unsigned int *output_cdf)
+__global__ void prefixSum(unsigned int *histogram)
 {
   int tid = threadIdx.x;
 
@@ -293,7 +292,7 @@ __global__ void prefixSum(unsigned int *histogram, unsigned int *output_cdf)
   }
 
   //REWRITE RESULTS TO MAIN MEMORY
-  output_cdf[tid] = Cache[tid];
+  histogram[tid] = Cache[tid];
 }
 
 __global__ void ReductionMin(unsigned int *sdata, unsigned int *results, int n)    //take thread divergence into account
@@ -356,8 +355,7 @@ void histogram_gpu(unsigned char *data,
   //unsigned char *data_pinned;
 
   // GPU
-  unsigned int *output_histogram;
-  unsigned int *output_cdf;
+  unsigned int *histogram;
   unsigned int * cdf_min;
 
   bool bPeriodicMerge = false;
@@ -372,12 +370,10 @@ void histogram_gpu(unsigned char *data,
   // Allocate arrays in GPU memory
   checkCuda(cudaMalloc((void **)&input_gpu, size * sizeof(unsigned char)));
   checkCuda(cudaMalloc((void **)&output_gpu, size * sizeof(unsigned char)));
-  checkCuda(cudaMalloc((void **)&output_histogram, NUM_BINS * sizeof(unsigned int)));
-  checkCuda(cudaMalloc((void **)&output_cdf, NUM_BINS * sizeof(unsigned int)));
+  checkCuda(cudaMalloc((void **)&histogram, NUM_BINS * sizeof(unsigned int)));
   checkCuda(cudaMalloc((void **)&cdf_min, sizeof(unsigned int)));
 
-  checkCuda(cudaMemset(output_histogram, 0, NUM_BINS * sizeof(unsigned int)));
-  checkCuda(cudaMemset(output_cdf, 0, NUM_BINS * sizeof(unsigned int)));
+  checkCuda(cudaMemset(histogram, 0, NUM_BINS * sizeof(unsigned int)));
   checkCuda(cudaMemset(output_gpu, 0, size * sizeof(unsigned char)));
   checkCuda(cudaMemset(cdf_min, 0, sizeof(unsigned int)));
 
@@ -403,13 +399,13 @@ void histogram_gpu(unsigned char *data,
   TIMER_CREATE(Ktime);
   TIMER_START(Ktime);
 #endif
-  //histogram_generation<<<5,256>>>(output_histogram, input_gpu, width*height);
-  //histogram256Kernel<<<gridXSize*gridYSize, 256>>>(output_histogram, input_gpu, width*height);
-  // get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_histogram);
-  // histogram1DPerThread4x64<<<numblocks, numthreads, numthreads * 256>>>(output_histogram, input_gpu, size);
-  histogram1DPerBlock<<<400,256/*threads.x*threads.y*/>>>( output_histogram, input_gpu, width * height / 4);
-  // get_cdf<<<dimGrid1D, dimBlock1D>>>(output_histogram, output_cdf, NUM_BINS);
-  prefixSum<<<1, 256>>>(output_histogram, output_cdf);
+  //histogram_generation<<<5,256>>>(histogram, input_gpu, width*height);
+  //histogram256Kernel<<<gridXSize*gridYSize, 256>>>(histogram, input_gpu, width*height);
+  // get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, histogram);
+  // histogram1DPerThread4x64<<<numblocks, numthreads, numthreads * 256>>>(histogram, input_gpu, size);
+  histogram1DPerBlock<<<400,256/*threads.x*threads.y*/>>>( histogram, input_gpu, width * height / 4);
+  // get_cdf<<<dimGrid1D, dimBlock1D>>>(histogram, histogram, NUM_BINS);
+  prefixSum<<<1, 256>>>(histogram);
 
   checkCuda(cudaPeekAtLastError());
   checkCuda(cudaDeviceSynchronize());
@@ -418,14 +414,13 @@ void histogram_gpu(unsigned char *data,
 
   /*
 	checkCuda(cudaMemcpy(probability_gpu, 
-			output_histogram, 
+			histogram, 
 			NUM_BINS*sizeof(unsigned int), 
 			cudaMemcpyDeviceToHost));
   */
-  checkCuda(cudaFree(output_histogram));
 
   // checkCuda(cudaMemcpy(cdf_gpu,
-  //                      output_cdf,
+  //                      histogram,
   //                      NUM_BINS * sizeof(unsigned int),
   //                      cudaMemcpyDeviceToHost));
   // Free resources and end the program
@@ -439,9 +434,9 @@ void histogram_gpu(unsigned char *data,
   // }
 
   // std::cout << "cdf min : " << cdf_min << std::endl;
-  //kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_cdf, width*height, cdf_min);
-  ReductionMin<<<1, 256>>>(output_cdf, cdf_min, 256);
-  kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_cdf, output_gpu, width * height, cdf_min);
+  //kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, histogram, width*height, cdf_min);
+  ReductionMin<<<1, 256>>>(histogram, cdf_min, 256);
+  kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, histogram, output_gpu, width * height, cdf_min);
   checkCuda(cudaPeekAtLastError());
   checkCuda(cudaDeviceSynchronize());
 
@@ -457,7 +452,7 @@ void histogram_gpu(unsigned char *data,
   //memcpy(data, data_pinned, size*sizeof(unsigned char));
 
   //checkCuda(cudaFreeHost(data_pinned));
-  checkCuda(cudaFree(output_cdf));
+  checkCuda(cudaFree(histogram));
   checkCuda(cudaFree(output_gpu));
   checkCuda(cudaFree(input_gpu));
 
