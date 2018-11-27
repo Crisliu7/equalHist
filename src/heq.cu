@@ -241,6 +241,22 @@ histogram1DPerBlock(
     }
 }
 
+__global__ void
+histogram1DPerGrid(
+    unsigned int *pHist,
+    const unsigned char *base, int N )
+{
+    for ( int i = blockIdx.x*blockDim.x+threadIdx.x;
+                 i < N;
+                 i += blockDim.x*gridDim.x ) {
+        unsigned int value = ((unsigned int *) base)[i];
+        atomicAdd( &pHist[ value & 0xff ], 1 ); value >>= 8;
+        atomicAdd( &pHist[ value & 0xff ], 1 ); value >>= 8;
+        atomicAdd( &pHist[ value & 0xff ], 1 ); value >>= 8;
+        atomicAdd( &pHist[ value ]       , 1 );
+    }
+}
+
 __global__ void get_cdf(unsigned int *histogram,
                         int n)
 {
@@ -403,7 +419,8 @@ void histogram_gpu(unsigned char *data,
   //histogram256Kernel<<<gridXSize*gridYSize, 256>>>(histogram, input_gpu, width*height);
   // get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, histogram);
   // histogram1DPerThread4x64<<<numblocks, numthreads, numthreads * 256>>>(histogram, input_gpu, size);
-  histogram1DPerBlock<<<400,256/*threads.x*threads.y*/>>>( histogram, input_gpu, width * height / 4);
+  // histogram1DPerBlock<<<400,256/*threads.x*threads.y*/>>>( histogram, input_gpu, width * height / 4);
+  histogram1DPerGrid<<<400,256/*threads.x*threads.y*/>>>( histogram, input_gpu, width * height / 4);
   // get_cdf<<<dimGrid1D, dimBlock1D>>>(histogram, histogram, NUM_BINS);
   prefixSum<<<1, 256>>>(histogram);
 
