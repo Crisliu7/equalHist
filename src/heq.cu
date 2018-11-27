@@ -26,9 +26,13 @@
   
 #define TILE_SIZE 16
 #define BLOCK_SIZE_1D 256
-#define NUM_GRAY_LEVELS 256
+#define NUM_BINS 256
+
 #define CUDA_TIMING
 #define DEBUG
+
+#define WARP_SIZE 32
+#define R 9
 
 unsigned char *input_gpu;
 unsigned char *output_gpu;
@@ -57,7 +61,7 @@ inline cudaError_t checkCuda(cudaError_t result) {
 
 
 __global__ void kernel(unsigned char *input, unsigned int *output_cdf, 
-                       //unsigned char *output, 
+                       unsigned char *output, 
                        unsigned int im_size, unsigned int cdf_min){
                        
     int x = blockIdx.x*TILE_SIZE+threadIdx.x;
@@ -67,9 +71,9 @@ __global__ void kernel(unsigned char *input, unsigned int *output_cdf,
     
 
     
-    //float temp = float(output_cdf[input[location]] - cdf_min)/float(im_size - cdf_min) * (NUM_GRAY_LEVELS - 1);
+    //float temp = float(output_cdf[input[location]] - cdf_min)/float(im_size - cdf_min) * (NUM_BINS - 1);
     //output[location] = round(temp);
-    input[location] = round(float(output_cdf[input[location]] - cdf_min)/float(im_size/4 - cdf_min) * (NUM_GRAY_LEVELS - 1));
+    output[location] = round(float(output_cdf[input[location]] - cdf_min)/float(im_size/4 - cdf_min) * (NUM_BINS - 1));
     //printf("the final: %d .", int(output[location]));  
 
 
@@ -92,6 +96,40 @@ __global__ void get_histogram(unsigned char *input,
     //__syncthreads();
     
 }
+
+__global__ void histogram_gmem_atomics(unsigned char *input, int width, int height, unsigned int *output)
+{
+  // pixel coordinates
+  int x = blockIdx.x * blockDim.x + threadIdx.x;
+  int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+  // grid dimensions
+  int nx = blockDim.x * gridDim.x; 
+  int ny = blockDim.y * gridDim.y;
+
+  // linear thread index within 2D block
+  int t = threadIdx.x + threadIdx.y * blockDim.x; 
+
+  // total threads in 2D block
+  int nt = blockDim.x * blockDim.y; 
+  
+  // linear block index within 2D grid
+  int g = blockIdx.x + blockIdx.y * gridDim.x;
+
+  // initialize temporary accumulation array in global memory
+  unsigned int *gmem = out + g * NUM_PARTS;
+  for (int i = t; i < NUM_BINS; i += nt) gmem[i] = 0;
+
+  // process pixels
+  // updates our block's partial histogram in global memory
+  for (int col = x; col < width; col += nx) 
+    for (int row = y; row < height; row += ny) { 
+    
+      atomicAdd(&gmem[input[row * width + col]], 1);
+      
+    }
+}
+
 
 
 __global__ void get_cdf(unsigned int *output_histogram, 
@@ -130,13 +168,15 @@ __global__ void kernel_warmup(unsigned char *input,
 }
 
 
+
+
 void histogram_gpu(unsigned char *data, 
                    unsigned int height, 
                    unsigned int width){
     
 	int gridXSize = 1 + (( width - 1) / TILE_SIZE);
 	int gridYSize = 1 + ((height - 1) / TILE_SIZE);
-  int gridSize_1D = 1 + (NUM_GRAY_LEVELS - 1)/ BLOCK_SIZE_1D;
+  int gridSize_1D = 1 + (NUM_BINS - 1)/ BLOCK_SIZE_1D;
 	
 	int XSize = gridXSize*TILE_SIZE;
 	int YSize = gridYSize*TILE_SIZE;
@@ -145,33 +185,33 @@ void histogram_gpu(unsigned char *data,
 	int size = XSize*YSize;
  
   // CPU
-  //unsigned int *probability_gpu = new unsigned int [NUM_GRAY_LEVELS];
-  unsigned int *cdf_gpu = new unsigned int [NUM_GRAY_LEVELS];
+  //unsigned int *probability_gpu = new unsigned int [NUM_BINS];
+  unsigned int *cdf_gpu = new unsigned int [NUM_BINS];
   
   // Pinned
-  unsigned char *data_pinned;
+  //unsigned char *data_pinned;
   
   // GPU
   unsigned int *output_histogram;
   unsigned int *output_cdf;
   
   // Pageable to Pinned memory
-  cudaMallocHost((void**)&data_pinned, size*sizeof(unsigned char));
-  memcpy(data_pinned, data, size*sizeof(unsigned char));
+  //cudaMallocHost((void**)&data_pinned, size*sizeof(unsigned char));
+  //memcpy(data_pinned, data, size*sizeof(unsigned char));
     
 	// Allocate arrays in GPU memory
 	checkCuda(cudaMalloc((void**)&input_gpu   , size*sizeof(unsigned char)));
-	//checkCuda(cudaMalloc((void**)&output_gpu  , size*sizeof(unsigned char)));
-  checkCuda(cudaMalloc((void**)&output_histogram  , NUM_GRAY_LEVELS*sizeof(unsigned int)));
-  checkCuda(cudaMalloc((void**)&output_cdf  , NUM_GRAY_LEVELS*sizeof(unsigned int)));
+	checkCuda(cudaMalloc((void**)&output_gpu  , size*sizeof(unsigned char)));
+  checkCuda(cudaMalloc((void**)&output_histogram  , NUM_BINS*sizeof(unsigned int)));
+  checkCuda(cudaMalloc((void**)&output_cdf  , NUM_BINS*sizeof(unsigned int)));
 	
-  checkCuda(cudaMemset(output_histogram , 0 , NUM_GRAY_LEVELS*sizeof(unsigned int)));
-  checkCuda(cudaMemset(output_cdf , 0 , NUM_GRAY_LEVELS*sizeof(unsigned int)));
-  //checkCuda(cudaMemset(output_gpu , 0 , size*sizeof(unsigned char)));
+  checkCuda(cudaMemset(output_histogram , 0 , NUM_BINS*sizeof(unsigned int)));
+  checkCuda(cudaMemset(output_cdf , 0 , NUM_BINS*sizeof(unsigned int)));
+  checkCuda(cudaMemset(output_gpu , 0 , size*sizeof(unsigned char)));
 	
   // Copy data to GPU
   checkCuda(cudaMemcpy(input_gpu, 
-      data_pinned, 
+      data, 
       size*sizeof(char), 
       cudaMemcpyHostToDevice));
 
@@ -191,9 +231,10 @@ void histogram_gpu(unsigned char *data,
 		TIMER_CREATE(Ktime);
 		TIMER_START(Ktime);
 	#endif
-        
+  //histogram_generation<<<5,256>>>(output_histogram, input_gpu, width*height);
+  //histogram256Kernel<<<gridXSize*gridYSize, 256>>>(output_histogram, input_gpu, width*height);
   get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_histogram);
-  get_cdf<<<dimGrid1D, dimBlock1D>>>(output_histogram, output_cdf, NUM_GRAY_LEVELS);
+  get_cdf<<<dimGrid1D, dimBlock1D>>>(output_histogram, output_cdf, NUM_BINS);
 
         
         
@@ -206,27 +247,27 @@ void histogram_gpu(unsigned char *data,
   /*
 	checkCuda(cudaMemcpy(probability_gpu, 
 			output_histogram, 
-			NUM_GRAY_LEVELS*sizeof(unsigned int), 
+			NUM_BINS*sizeof(unsigned int), 
 			cudaMemcpyDeviceToHost));
   */
   checkCuda(cudaFree(output_histogram));
      
 	checkCuda(cudaMemcpy(cdf_gpu, 
 			output_cdf, 
-			NUM_GRAY_LEVELS*sizeof(unsigned int), 
+			NUM_BINS*sizeof(unsigned int), 
 			cudaMemcpyDeviceToHost));
     // Free resources and end the program
     
    unsigned int cdf_min = INT_MAX;
-   for (int i = 0; i < NUM_GRAY_LEVELS; i++){
+   for (int i = 0; i < NUM_BINS; i++){
      if(cdf_gpu[i] != 0 && cdf_gpu[i] < cdf_min){
        cdf_min = cdf_gpu[i];
      }
    }
    
   // std::cout << "cdf min : " << cdf_min << std::endl;
-  kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_cdf, width*height, cdf_min);
-  //kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_cdf, output_gpu, width*height, cdf_min);
+  //kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_cdf, width*height, cdf_min);
+  kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_cdf, output_gpu, width*height, cdf_min);
   checkCuda(cudaPeekAtLastError());                                     
   checkCuda(cudaDeviceSynchronize()); 
   
@@ -237,20 +278,20 @@ void histogram_gpu(unsigned char *data,
 	#endif
         
             
-	checkCuda(cudaMemcpy(data_pinned, 
-			input_gpu, 
+	checkCuda(cudaMemcpy(data, 
+			output_gpu, 
 			size*sizeof(unsigned char), 
 			cudaMemcpyDeviceToHost));
-  memcpy(data, data_pinned, size*sizeof(unsigned char));  
+  //memcpy(data, data_pinned, size*sizeof(unsigned char));  
   
   
-  checkCuda(cudaFreeHost(data_pinned));
+  //checkCuda(cudaFreeHost(data_pinned));
   checkCuda(cudaFree(output_cdf));
-	//checkCuda(cudaFree(output_gpu));
+	checkCuda(cudaFree(output_gpu));
 	checkCuda(cudaFree(input_gpu));
  
  /*
-  for(int i = 0; i < NUM_GRAY_LEVELS; i++){
+  for(int i = 0; i < NUM_BINS; i++){
     std::cout << "Value " << i << " : " << probability_gpu[i] << "  " << cdf_gpu[i] << std::endl;
   }*/
   
