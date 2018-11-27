@@ -74,7 +74,7 @@ __global__ void kernel(unsigned char *input, unsigned int *output_cdf,
 
   //float temp = float(output_cdf[input[location]] - cdf_min)/float(im_size - cdf_min) * (NUM_BINS - 1);
   //output[location] = round(temp);
-  output[location] = round(float(output_cdf[input[location]] - cdf_min) / float(im_size / 4 - cdf_min) * (NUM_BINS - 1));
+  output[location] = (unsigned char)(float(output_cdf[input[location]] - cdf_min) / float(im_size / 4 - cdf_min) * (NUM_BINS - 1));
   //printf("the final: %d .", int(output[location]));
 }
 
@@ -345,9 +345,9 @@ void histogram_gpu(unsigned char *data,
 #endif
   //histogram_generation<<<5,256>>>(output_histogram, input_gpu, width*height);
   //histogram256Kernel<<<gridXSize*gridYSize, 256>>>(output_histogram, input_gpu, width*height);
-  get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_histogram);
+  // get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_histogram);
   // histogram1DPerThread4x64<<<numblocks, numthreads, numthreads * 256>>>(output_histogram, input_gpu, size);
-  // histogram1DPerBlock<<<400,256/*threads.x*threads.y*/>>>( output_histogram, input_gpu, width * height / 4);
+  histogram1DPerBlock<<<400,256/*threads.x*threads.y*/>>>( output_histogram, input_gpu, width * height / 4);
   get_cdf<<<dimGrid1D, dimBlock1D>>>(output_histogram, output_cdf, NUM_BINS);
 
   checkCuda(cudaPeekAtLastError());
