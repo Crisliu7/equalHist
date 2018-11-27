@@ -64,7 +64,7 @@ inline cudaError_t checkCuda(cudaError_t result)
 
 __global__ void kernel(unsigned char *input, unsigned int *output_cdf,
                        unsigned char *output,
-                       unsigned int im_size, unsigned int cdf_min)
+                       unsigned int im_size, unsigned int *cdf_min)
 {
 
   int x = blockIdx.x * TILE_SIZE + threadIdx.x;
@@ -74,7 +74,7 @@ __global__ void kernel(unsigned char *input, unsigned int *output_cdf,
 
   //float temp = float(output_cdf[input[location]] - cdf_min)/float(im_size - cdf_min) * (NUM_BINS - 1);
   //output[location] = round(temp);
-  output[location] = (unsigned char)(float(output_cdf[input[location]] - cdf_min) / float(im_size / 4 - cdf_min) * (NUM_BINS - 1));
+  output[location] = (unsigned char)(float(output_cdf[input[location]] - *cdf_min) / (im_size - *cdf_min) * (NUM_BINS - 1));
   //printf("the final: %d .", int(output[location]));
 }
 
@@ -258,13 +258,32 @@ __global__ void get_cdf(unsigned int *output_histogram,
   output_cdf[d_hist_idx] = cdf_val;
 }
 
-/*
-__global__ void get_cdf_min(unsigned int *output_cdf, unsigned int cdf_min)
-{
+__global__ void ReductionMin(unsigned int *sdata, unsigned int *results, int n)    //take thread divergence into account
+{	
+	// extern __shared__ int sdata[]; 
+	unsigned int tx = threadIdx.x; 
 
+	// block-wide reduction
+	for(unsigned int offset = blockDim.x>>1; offset > 0; offset >>= 1)
+	{
+		__syncthreads();
+		if(tx < offset)
+	    {
+			if(sdata[tx + offset] < sdata[tx] || sdata[tx] == 0)
+				sdata[tx] = sdata[tx + offset];
+		}
 
+	}
+
+		// finally, thread 0 writes the result 
+	if(threadIdx.x == 0) 
+	{ 
+		// the result is per-block 
+		*results = sdata[0]; 
+	} 
 }
-*/
+
+
 __global__ void kernel_warmup(unsigned char *input,
                               unsigned char *output)
 {
@@ -301,6 +320,7 @@ void histogram_gpu(unsigned char *data,
   // GPU
   unsigned int *output_histogram;
   unsigned int *output_cdf;
+  unsigned int * cdf_min;
 
   bool bPeriodicMerge = false;
   dim3 threads(16, 4, 1);
@@ -316,10 +336,12 @@ void histogram_gpu(unsigned char *data,
   checkCuda(cudaMalloc((void **)&output_gpu, size * sizeof(unsigned char)));
   checkCuda(cudaMalloc((void **)&output_histogram, NUM_BINS * sizeof(unsigned int)));
   checkCuda(cudaMalloc((void **)&output_cdf, NUM_BINS * sizeof(unsigned int)));
+  checkCuda(cudaMalloc((void **)&cdf_min, sizeof(unsigned int)));
 
   checkCuda(cudaMemset(output_histogram, 0, NUM_BINS * sizeof(unsigned int)));
   checkCuda(cudaMemset(output_cdf, 0, NUM_BINS * sizeof(unsigned int)));
   checkCuda(cudaMemset(output_gpu, 0, size * sizeof(unsigned char)));
+  checkCuda(cudaMemset(cdf_min, 0, sizeof(unsigned int)));
 
   // Copy data to GPU
   checkCuda(cudaMemcpy(input_gpu,
@@ -349,6 +371,7 @@ void histogram_gpu(unsigned char *data,
   // histogram1DPerThread4x64<<<numblocks, numthreads, numthreads * 256>>>(output_histogram, input_gpu, size);
   histogram1DPerBlock<<<400,256/*threads.x*threads.y*/>>>( output_histogram, input_gpu, width * height / 4);
   get_cdf<<<dimGrid1D, dimBlock1D>>>(output_histogram, output_cdf, NUM_BINS);
+  // prefixSum<<<1, 256>>>(output_histogram, 256, cdf_min);
 
   checkCuda(cudaPeekAtLastError());
   checkCuda(cudaDeviceSynchronize());
@@ -363,23 +386,23 @@ void histogram_gpu(unsigned char *data,
   */
   checkCuda(cudaFree(output_histogram));
 
-  checkCuda(cudaMemcpy(cdf_gpu,
-                       output_cdf,
-                       NUM_BINS * sizeof(unsigned int),
-                       cudaMemcpyDeviceToHost));
+  // checkCuda(cudaMemcpy(cdf_gpu,
+  //                      output_cdf,
+  //                      NUM_BINS * sizeof(unsigned int),
+  //                      cudaMemcpyDeviceToHost));
   // Free resources and end the program
 
-  unsigned int cdf_min = INT_MAX;
-  for (int i = 0; i < NUM_BINS; i++)
-  {
-    if (cdf_gpu[i] != 0 && cdf_gpu[i] < cdf_min)
-    {
-      cdf_min = cdf_gpu[i];
-    }
-  }
+  // for (int i = 0; i < NUM_BINS; i++)
+  // {
+  //   if (cdf_gpu[i] != 0 && cdf_gpu[i] < cdf_min)
+  //   {
+  //     cdf_min = cdf_gpu[i];
+  //   }
+  // }
 
   // std::cout << "cdf min : " << cdf_min << std::endl;
   //kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_cdf, width*height, cdf_min);
+  ReductionMin<<<1, 256>>>(output_cdf, cdf_min, 256);
   kernel<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_cdf, output_gpu, width * height, cdf_min);
   checkCuda(cudaPeekAtLastError());
   checkCuda(cudaDeviceSynchronize());
