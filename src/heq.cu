@@ -211,6 +211,36 @@ histogram1DPerThread4x64(
   merge64HistogramsToOutput<false>(output_histogram);
 }
 
+__global__ void
+histogram1DPerBlock(
+    unsigned int *pHist,
+    const unsigned char *base, int N )
+{
+    __shared__ int sHist[256];
+    for ( int i = threadIdx.x;
+              i < 256;
+              i += blockDim.x ) {
+        sHist[i] = 0;
+    }
+    __syncthreads();
+    for ( int i = blockIdx.x*blockDim.x+threadIdx.x;
+              i < N;
+              i += blockDim.x*gridDim.x ) {
+            unsigned int value = ((unsigned int *) base)[i];
+
+            atomicAdd( &sHist[ value & 0xff ], 1 ); value >>= 8;
+            atomicAdd( &sHist[ value & 0xff ], 1 ); value >>= 8;
+            atomicAdd( &sHist[ value & 0xff ], 1 ); value >>= 8;
+            atomicAdd( &sHist[ value ]       , 1 );
+    }
+    __syncthreads();
+    for ( int i = threadIdx.x;
+              i < 256;
+              i += blockDim.x ) {
+        atomicAdd( &pHist[i], sHist[ i ] );
+    }
+}
+
 __global__ void get_cdf(unsigned int *output_histogram,
                         unsigned int *output_cdf,
                         int n)
@@ -315,8 +345,9 @@ void histogram_gpu(unsigned char *data,
 #endif
   //histogram_generation<<<5,256>>>(output_histogram, input_gpu, width*height);
   //histogram256Kernel<<<gridXSize*gridYSize, 256>>>(output_histogram, input_gpu, width*height);
-  // get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_histogram);
-  histogram1DPerThread4x64<<<numblocks, numthreads, numthreads * 256>>>(output_histogram, input_gpu, size);
+  get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_histogram);
+  // histogram1DPerThread4x64<<<numblocks, numthreads, numthreads * 256>>>(output_histogram, input_gpu, size);
+  // histogram1DPerBlock<<<400,256/*threads.x*threads.y*/>>>( output_histogram, input_gpu, width * height / 4);
   get_cdf<<<dimGrid1D, dimBlock1D>>>(output_histogram, output_cdf, NUM_BINS);
 
   checkCuda(cudaPeekAtLastError());
