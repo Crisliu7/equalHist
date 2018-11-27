@@ -258,6 +258,44 @@ __global__ void get_cdf(unsigned int *output_histogram,
   output_cdf[d_hist_idx] = cdf_val;
 }
 
+__global__ void prefixSum(unsigned int *histogram, unsigned int *output_cdf)
+{
+  int tid = threadIdx.x;
+
+  //USE SHARED MEMORY - COMON WE ARE EXPERIENCED PROGRAMMERS
+  __shared__ int Cache[256];
+  Cache[tid] = histogram[tid];
+  __syncthreads();
+  int space = 1;
+
+  //BEGIN
+  for (int i = 0; i < 8; i++)
+  {
+    int temp = Cache[tid];
+    int neighbor = 0;
+    if ((tid - space) >= 0)
+    {
+      neighbor = Cache[tid - space];
+    }
+    __syncthreads(); //AFTER LOADING
+
+    if (tid < space)
+    {
+      //DO NOTHING
+    }
+    else
+    {
+      Cache[tid] = temp + neighbor;
+    }
+
+    space = space * 2;
+    __syncthreads();
+  }
+
+  //REWRITE RESULTS TO MAIN MEMORY
+  output_cdf[tid] = Cache[tid];
+}
+
 __global__ void ReductionMin(unsigned int *sdata, unsigned int *results, int n)    //take thread divergence into account
 {	
 	// extern __shared__ int sdata[]; 
@@ -370,8 +408,8 @@ void histogram_gpu(unsigned char *data,
   // get_histogram<<<dimGrid2D, dimBlock2D>>>(input_gpu, output_histogram);
   // histogram1DPerThread4x64<<<numblocks, numthreads, numthreads * 256>>>(output_histogram, input_gpu, size);
   histogram1DPerBlock<<<400,256/*threads.x*threads.y*/>>>( output_histogram, input_gpu, width * height / 4);
-  get_cdf<<<dimGrid1D, dimBlock1D>>>(output_histogram, output_cdf, NUM_BINS);
-  // prefixSum<<<1, 256>>>(output_histogram, 256, cdf_min);
+  // get_cdf<<<dimGrid1D, dimBlock1D>>>(output_histogram, output_cdf, NUM_BINS);
+  prefixSum<<<1, 256>>>(output_histogram, output_cdf);
 
   checkCuda(cudaPeekAtLastError());
   checkCuda(cudaDeviceSynchronize());
