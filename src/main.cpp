@@ -56,11 +56,11 @@ int main( int argc, const char** argv ) {
     
     Mat temp = input_image.clone();
 
-/*
+
     histogram_gpu_warmup((unsigned char *) temp.data, 
                                     height, 
                                     width);
- */   
+   
     ///////////////////////
     // START GPU Processing
     ///////////////////////
