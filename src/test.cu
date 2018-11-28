@@ -1,54 +1,103 @@
-__global__ void histogram_generation(unsigned int *output_histogram, unsigned char *input_gpu, int size)
+__global__ void histogram_gmem_atomics(unsigned char *input, unsigned int width, unsigned int height, unsigned int *output_histogram_local)
 {
+    // pixel coordinates
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-  // allocate shared memory
-  __shared__ int Hs[(NUM_GRAY_LEVELS + 1) * R];
+    // grid dimensions
+    int nx = blockDim.x * gridDim.x; 
+    int ny = blockDim.y * gridDim.y;
 
-  // warp index, lane and number of warps per block
-  const int warpid = (int)(threadIdx.x / WARP_SIZE);
-  const int lane = threadIdx.x % WARP_SIZE;
-  const int warps_block = blockDim.x / WARP_SIZE;
-  // printf("warpid: %d lane: %d warps_block: %d", warpid, lane, warps_block);
+    // linear thread index within 2D block
+    int t = threadIdx.x + threadIdx.y * blockDim.x; 
 
-  // Offset to per-block sub-histogram
-  const int off_rep = (NUM_GRAY_LEVELS + 1) * (threadIdx.x % R);
+    // total threads in 2D block
+    int nt = blockDim.x * blockDim.y; 
 
-  // constants for interleaved read access
-  const int begin = (size / warps_block) * warpid + WARP_SIZE * blockIdx.x + lane;
-  const int end = (size / warps_block) * (warpid + 1);
-  const int step = WARP_SIZE * gridDim.x;
+    // linear block index within 2D grid
+    int g = blockIdx.x + blockIdx.y * gridDim.x;
 
-  // initialization
-  for (int pos = threadIdx.x; pos < (NUM_GRAY_LEVELS + 1) * R; pos += blockDim.x)
-    Hs[pos] = 0;
-
-  __syncthreads(); // intra-block synchronization
-
-  // main loop
-  for (int i = begin; i < end; i += step)
-  {
-    int d = input[i]; // global memory read
-
-    atomicAdd(&Hs[off_rep + d], 1); // vote in shared memory
-  }
-
-  __syncthreads(); // intra-block synchronization
-
-  for (int pos = threadIdx.x; pos < NUM_GRAY_LEVELS; pos += blockDim.x)
-  {
-    int sum = 0;
-    for (int base = 0; base < (NUM_GRAY_LEVELS + 1) * R; base += NUM_GRAY_LEVELS + 1)
-    {
-      sum += Hs[base + pos];
+    //int NUM_PARTS = nx * ny;
+    // initialize temporary accumulation array in global memory
+    unsigned int *gmem = output_histogram_local + g * NUM_PARTS;
+    for (int i = t; i < NUM_BINS; i += nt) {
+        gmem[i] = 0;
     }
-    atomicAdd(output_histogram + pos, sum);
-  }
-  // int x = blockIdx.x*TILE_SIZE+threadIdx.x;
-  // int y = blockIdx.y*TILE_SIZE+threadIdx.y;
+    
 
-  // int location =   y*TILE_SIZE*gridDim.x+x;
+    // process pixels
+    // updates our block's partial histogram in global memory
+    for (int col = x; col < width; col += nx) {
+        for (int row = y; row < height; row += ny) { 
+            atomicAdd(&gmem[input[row * width + col]], 1);
+        }
+    }
+    
+}
 
-  // unsigned int location = blockDim.x * blockIdx.x + threadIdx.x;
-  // atomicAdd(&(histogram[input[location]]), 1);
-  // __syncthreads();
+__global__ void histogram_final_accum(const unsigned int *output_histogram_local, int n, unsigned int *output_histogram)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < NUM_BINS) {
+        unsigned int total = 0;
+        for (int j = 0; j < n; j++){
+            total += output_histogram_local[i + NUM_PARTS * j];
+        } 
+        output_histogram[i] = total;
+    }
+}
+
+
+__global__ void histogram1DPerBlock(
+    unsigned int *output_histogram,
+    const unsigned char *input_gpu, int N )
+{
+    __shared__ int sHist[256];
+    for ( int i = threadIdx.x;
+              i < 256;
+              i += blockDim.x ) {
+        sHist[i] = 0;
+    }
+    __syncthreads();
+    for ( int i = blockIdx.x*blockDim.x+threadIdx.x;
+              i < N;
+              i += blockDim.x*gridDim.x ) {
+            unsigned int value = ((unsigned int *) base)[i];
+
+            atomicAdd( &sHist[ value & 0xff ], 1 ); value >>= 8;
+            atomicAdd( &sHist[ value & 0xff ], 1 ); value >>= 8;
+            atomicAdd( &sHist[ value & 0xff ], 1 ); value >>= 8;
+            atomicAdd( &sHist[ value ]       , 1 );
+    }
+    __syncthreads();
+    for ( int i = threadIdx.x;
+              i < 256;
+              i += blockDim.x ) {
+        atomicAdd( &output_histogram[i], sHist[ i ] );
+    }
+}
+
+__global__ void ReductionMin(unsigned int *sdata, unsigned int *results, int n)    //take thread divergence into account
+{	
+	// extern __shared__ int sdata[]; 
+	unsigned int tx = threadIdx.x; 
+
+	// block-wide reduction
+	for(unsigned int offset = blockDim.x>>1; offset > 0; offset >>= 1)
+	{
+		__syncthreads();
+		if(tx < offset)
+	    {
+			if(sdata[tx + offset] < sdata[tx] || sdata[tx] == 0)
+				sdata[tx] = sdata[tx + offset];
+		}
+
+	}
+
+		// finally, thread 0 writes the result 
+	if(threadIdx.x == 0) 
+	{ 
+		// the result is per-block 
+		*results = sdata[0]; 
+	} 
 }
